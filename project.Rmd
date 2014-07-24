@@ -1,0 +1,191 @@
+---
+title: "Predicting Type of Exercise by Weareables Accelerometers Data"
+author: "Caio Miyashiro"
+date: "Tuesday, July 22, 2014"
+output: html_document
+---
+
+## Synopsis
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it.
+
+In this project, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har
+
+The data for this project come from this source: [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har).
+
+## Data Gathering
+
+The following script was used to make sure the data was available for loading and processing. If the files are not in the working directory, R will download them.
+
+```{r}
+if (!file.exists("pml-training.csv")) {
+    download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", 
+                  destfile = "pml-training.csv")
+}
+if (!file.exists("pml-testing.csv")) {
+    download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", 
+                  destfile = "pml-testing.csv")
+}
+```
+
+## Preprocessing
+
+For preprocessing, it was created 2 functions that manipulate and transform the data in order to create a tidy dataset. The first function is for use in a 'sapply' function and it calculates the percentage of NA's in a given dataframe column. The second function is the preprocessing code per si and it does the following steps:  
+
+1. Manually remove the first attributes (*i.e.* username, timestamp, etc...), which have no predictive power and carry no additional information about exercise types.
+2. convert columns to numeric type.
+3. Use the first function to find and delete columns that have more than 90% of it made of NA's.
+4. Use the 'nearZeroVar' function from the caret package to diagnose not useful predictors (*i.e.* predictors that have few unique values relative to the number of samples or the ratio of the frequency of the most common value to the frequency of the second most common value is large).
+5. If there are still missing values in the dataset, use the caret function 'preProcess' to imput some of the missing values using a trained bagged tree to predict the missing values.
+
+With the actual dataset. These two functions managed to decrease the number of variables from 159 to 52.
+
+
+```{r}
+##################### function 1: 'lotOfNAs'
+
+# remove if na's appear on more than 90% of total cases
+lotOfNAs <- function(vector){
+    if(sum(is.na(vector))/length(vector) > 0.9){ # if vector is made of more than 90% NAs
+        res <- TRUE;                             # return true
+    }else{                                       # if it doesn't
+        res <- FALSE;                            # return false
+    }
+    invisible(res);                              # return the answer
+}
+```
+
+```{r}
+##################### function 2: 'preProcessDataFrame'
+
+# function that receive a dataframe and perform its preprocessing
+preProcessDataFrame <- function(dataFrame){
+    
+    subsetTraining <- dataFrame[,-(1:7)]; # manually remove non significant values
+    
+    end <- ncol(subsetTraining)           # get end (class) index
+    
+                                   # convert everything but the class into numeric
+    subsetTraining[,-end] <- data.frame(sapply(subsetTraining[,-end],as.numeric))
+    
+                                   # verify which columns are made most of NAs
+    varsWith90NAs <- sapply(subsetTraining, lotOfNAs);
+                                   # remove these columns
+    subsetTraining <- subsetTraining[,!varsWith90NAs];
+    
+                    # detect variables who don't contribute for the classification
+    nzv <- nearZeroVar(subsetTraining[,-end],saveMetrics = TRUE)
+    subsetTraining <- subsetTraining[,!as.logical(nzv$nzv)]
+    
+    if(any(is.na(subsetTraining))){               # if there are any remaining NA's
+                                                  # imput these missing values
+        preProc <- preProcess(subsetTraining[,-end],method="bagImpute")
+        subsetTraining[,-end] <- predict(preProc,subsetTraining[,-end])
+        remove("preProc")                         # memory release    
+    }    
+    invisible(subsetTraining);
+}
+```
+
+The next lines of code read the dataset into a variable named 'training'. Next, it was used the 'createDataPartition' function from the caret package to split this data on training and validation set (the latter is created afterwards). Note the 'p=0.1' in the first line. Due to the dataset size, it was only used 10% of it to create the training set. More tests were made with bigger datasets, but the performance was exponentially worse.
+Finally, in the last line, it was passed the loaded dataframe to the manually created 'preProcessDataFrame' function, which will create me a tidy dataset.
+
+```{r}
+library(caret)                              # import caret package
+set.seed(2014)                              # set random number generation seed
+                                            # read training data
+training <- read.csv("pml-training.csv");
+                                            #split into training and validation
+subsetTrainingIndex <- createDataPartition(training$classe, p=0.1, list = FALSE);
+subsetTraining <- training[subsetTrainingIndex,];
+                                            # preprocess dataframe
+subsetTraining <- preProcessDataFrame(subsetTraining);
+```
+
+A first view on this data reveals a slight imbalance among the data classes. This can impact on the classifier training, where it learns 'more' on how to classify the class with more examples, considering that this approach would give a better result if comparing to random classification. Independently of the classification results, a better performance can be achieved if the classes are all balanced.  
+
+```{r}
+hist(as.numeric(training$classe), axes = FALSE, xlab = "Exercise Class",
+     col="red", main = "Histogram of variable 'classe'")
+axis(2)
+axis(1, at = c(1,2,3,4,5), labels = c("A","B","C","D","E"))
+```
+
+## Model Training
+
+Next, using the tidy dataset created by the 'preProcessDataFrame' function, It was trained a random forest classifier. Random forests are one on a diverse range of classifiers, each one with its pros and cons. As stated in [[1]][1], one of the advantages of random forests are: 
+
+* It is unexcelled in accuracy among current algorithms.
+* It gives estimates of what variables are important in the classification.
+* There's no parameter selection involved. While random forest may overfit a given data set, just as any other machine learning algorithm, it has been shown by Breiman that classifier variance does not grow with the number of trees used (unlike with Adaboosted decision trees, for example). Therefore, it's always better to use more trees, memory and computational power allowing.
+* It generates an internal unbiased estimate of the generalization error as the forest building progresses.
+* It computes proximities between pairs of cases that can be used in clustering, locating outliers, or (by scaling) give interesting views of the data.  
+
+To do this step, it was used the 'trainControl' function from the caret package, which sets and controls some parameters and behaviours in the training process.
+Next, the model was trained using the 'train' function from the caret package. Note the last parameter 'importance = TRUE' was used for the next steps in the model and data evaluation.
+
+```{r, cache=TRUE}
+# model fit using random forests
+trainPar <- trainControl(allowParallel = TRUE, method = "cv", number = 5);
+modelFit <- train(classe ~ ., data = subsetTraining, method="rf",
+                  trainControl = trainPar, importance=TRUE);
+```
+
+After the training procedure, as introduced in [[2]][2], random forests can evaluate the attributes importance and their impact on classification. This is done by a permutation test[[3]][3], in which the idea is that if the variable is not important (the null hypothesis), then rearranging the values of that variable will not degrade prediction accuracy. To evaluate the variable importance, it was used the 'varImp' function from the randomForest package, which calculate the most important attributes in ascending order, and then 'plot' to plot the results. Because it had to many variables, it was used just the first 20 most important variables for evaluation. The results you can see below.
+
+```{r, fig.height=6}
+varImportance <- varImp(modelFit)
+varImportance[[1]] <- varImportance[[1]][1:20,]
+plot(varImportance)
+```
+
+As we can see in the figure above, 'roll_belt', 'pitch_belt', 'yaw_belt' and 'magnet_belt_z' are, undoubtedly, the most important attributes in all exercise types classification. Unfortunately, no codebook was available when this project was done and no evaluation about the attributes meaning could be made. With the visualization of some examples using only 2 attributes between the most important variables (roll_belt and pitch_belt), it can be seen that the examples from the same classes are coupled together, therefore, the random forest can already create areas of decision for each class type. Note this graphic is just a section from all the existent points. One thing to note is that, even though class "A" is the perfect exercise class, we get a lot of variation, comparing it with the other classes. In the moment of this project, I really do not know the reason, but it is something to search for more about.
+
+```{r}
+library(ggplot2)                                    # import qplot function library
+qplot(roll_belt, pitch_belt, color = classe, data = subsetTraining,
+      ylim = c(13,28), xlim=c(110,130),             # stablish x and y range
+      size=2,                                       # increase dot point size
+      main = "Examples distributed by roll_belt and pitch_belt attributes")
+```
+
+## Cross-Validation and Model Evaluation
+
+To evaluate the model, it was used the validation set, a subset of size 500 from the training set independent from the variable 'subsetTraining'. Because of the Random Forest algorithm, the error measure is the actual cross-validation error.
+
+```{r}
+                                            # get independet set from the training set
+subsetTesting <- training[-subsetTrainingIndex,];
+                                            # preprocess it to get a tidy dataset
+subsetTesting <- preProcessDataFrame(subsetTesting);
+                                            # make a subset of size 500    
+subsetTesting <- subsetTesting[sample(1:nrow(subsetTesting), 500),];
+                                            # evaluate the model
+errorMeasure <- confusionMatrix(subsetTesting$classe, predict(modelFit,subsetTesting));
+errorMeasure
+```
+
+The estimated out-of-sample error is 1 - the model accuracy, which in this case is `r errorMeasure$overall[1]`.  
+
+```{r}
+outOfSampleError <- 1 - errorMeasure$overall[1];
+names(outOfSampleError) <- "Out of Sample Error"
+outOfSampleError
+```
+**So, the estimated out-of-sample error of this model is `r (outOfSampleError*100)`%** 
+
+## Test Set Classification
+
+Finally, the test set was preprocessed and classified by the created model. The classification can be seen below. From the 20 exercise examples, the model missed two examples, with an accuracy of `r 18/20`  
+
+```{r}
+testingFinal <- read.csv("pml-testing.csv");
+testingFinal$classe <- 1:nrow(testingFinal);
+testingFinal <- preProcessDataFrame(testingFinal);
+
+predict(modelFit,testingFinal)
+```
+
+[1]: http://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm "University of California Random Forests Theory"
+[2]: http://alandgraf.blogspot.com.br/2012/07/random-forest-variable-importance.html "Post on Random Forests Variable Importance"
+[3]: http://en.wikipedia.org/wiki/Resampling_(statistics)#Permutation_tests "Permutation Tests Wikipedia Page"
